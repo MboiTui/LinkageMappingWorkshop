@@ -1,0 +1,333 @@
+---
+title: "Convert to LepMap format"
+author: "Lorenzo Bertola"
+date: "29/09/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load tidyverse
+
+```{r}
+library(tidyverse)
+library(janitor)
+```
+
+Convert bed to ped (bed is binary and couldn't figure how to import in R)
+
+```{bash}
+plink --bfile barra52KCRCP --recode --tab --out barra52KCRCP_2
+```
+
+Plink formats:
+- .bed format <- compressed format
+- .ped format <- human readable
+
+Read ped (genotypes) and map (Snp metadata) file
+
+```{r}
+my.ped <- read_delim("barra52KCRCP_2.ped", delim = "\t", col_names = FALSE)
+my.map <- read_delim("barra52KCRCP_2.map", delim = "\t", col_names = c("col0","markerID", "col2", "col3"))
+```
+
+Check dataframes
+
+```{r}
+head(my.map)
+```
+
+```{r}
+my.ped[1:5,1:10]
+```
+
+Check dimensions of both dataframes
+
+```{r}
+dim(my.ped)
+```
+
+```{r}
+dim(my.map)
+```
+
+Make vector of column names
+
+```{r}
+my.cols <- c("Pop","Ind","Father","Mother","Sex","Pheno",my.map$markerID)
+```
+
+Add to my.ped file to create dataframe with ind as rows and snps as columns
+
+```{r}
+colnames(my.ped) <- my.cols
+```
+
+Check it worked
+
+```{r}
+my.ped[1:10,1:10]
+```
+
+Add fam ID in the "FatherID_MotherID" format.
+
+```{r}
+my.ped <- my.ped %>% mutate(Pop = paste0(Father,"_",Mother))
+```
+
+Let's see family size and number of families.
+
+```{r}
+as.data.frame(table(my.ped$Pop))
+```
+
+We have 18 individuals assigned to family `0_0`. These are the parents. We will fix that later. Then, we have 24 families, with 1 to 310 offspring. All families with less than ~30 offspring will be of no use for linkage mapping. Thus, we will remove those samples.
+
+```{r}
+fam.to.retain <- as.data.frame(table(my.ped$Pop)) %>%
+  filter(Freq > 30) %>% pull(Var1)
+
+#add back parents
+fam.to.retain <- c("0_0",as.character(fam.to.retain))
+
+#filter
+my.ped <- my.ped %>% filter(Pop %in% fam.to.retain)
+```
+
+Let's check to see that we only have families with more than 30 offspring.
+
+```{r}
+table(my.ped$Pop)
+```
+
+Now, for the sake of the workshop, let's retain only 2 families with ~130 samples each:"362823524_356472864" and "363033223_51501".
+
+```{r}
+my.ped <- my.ped %>% filter(Pop == "362823524_356472864" |
+                                Pop == "363033223_51501" |
+                                Ind == "362823524" |
+                                Ind == "356472864" |
+                                Ind == "363033223" |
+                                Ind == "51501") 
+```
+
+Let's check the dataframe is correct. We should have 4 parents plus + 127 Offspring + 135 offspring, for a total of 266 individuals.
+
+```{r}
+nrow(my.ped)
+```
+
+```{r}
+table(my.ped$Pop)
+```
+
+Sweet. The last thing to do is to assign the parents to their respective families, and add sex information for those 4 parents.
+
+```{r}
+head(my.ped)
+```
+
+Assign parents to respective families, and retain current Pop value for offspring (i.e., `TRUE ~ Pop`).
+
+```{r}
+my.ped <- my.ped %>%
+  mutate(Pop = case_when(Ind == "362823524" ~ "362823524_356472864",
+                         Ind == "356472864" ~ "362823524_356472864",
+                         Ind == "363033223" ~ "363033223_51501",
+                         Ind == "51501" ~ "363033223_51501",
+                         TRUE ~ Pop))
+```
+
+Check that we now have only 2 families
+
+```{r}
+table(my.ped$Pop)
+```
+
+Now, based on the plink files, the first individual should be the father, and the second the mother. Let's assign sex accordingly.
+
+```{r}
+my.ped <- my.ped %>% mutate(Sex = case_when(Ind == "362823524" ~ 1,
+                                              Ind == "356472864" ~ 2,
+                                              Ind == "363033223" ~ 1,
+                                              Ind == "51501" ~ 2,
+                                              TRUE ~ Sex))
+```
+
+Now, let's also produce files for each family separately.
+
+```{r}
+fam1 <- my.ped %>% filter(Pop == "362823524_356472864")
+fam2 <- my.ped %>% filter(Pop == "363033223_51501")
+```
+
+Merge the three dataset into a list for easier processing.
+
+```{r}
+my.list <- list("TwoFams"=my.ped, "fam1"=fam1, "fam2"=fam2)
+```
+
+Let's ensure Father and Mother columns are interpreted as characters
+
+```{r}
+my.list <- lapply(my.list, function(x){
+  x <- x %>% mutate(Father = as.character(Father),
+                    Mother = as.character(Mother))
+  
+  return(x)
+})
+```
+
+Now, let's transpose all files to match LepMap format.
+
+```{r}
+my.list <- lapply(my.list, function(x){
+  y <- as_tibble(cbind(nms = names(x), t(x)))
+  
+  return(y)
+})
+```
+
+Check the column format after transposing
+
+```{r}
+my.list$TwoFams[1:10,1:10]
+```
+
+Remove whitespaces resulting from transposing.
+
+```{r}
+my.list <- lapply(my.list, function(x){
+  y <- x %>% mutate(across(everything(),
+                           gsub,
+                           pattern = " ",
+                           replacement = ""))
+  
+  return(y)
+})
+```
+
+These steps are sensitive so i recommend checking at every step.
+
+```{r}
+my.list$fam2[1:10,1:10]
+```
+
+Add the placeholder "POS" column, and replace first 6 values in column 1 with "CHR"
+
+```{r}
+my.list <- lapply(my.list, function(x){
+  y <- x %>% add_column(V1 = "POS", .before = "V2")
+  
+  y$nms[1:6] <- "CHR"
+  
+  return(y)
+})
+```
+
+Check output:
+
+```{r}
+my.list$TwoFams[1:10,1:10]
+```
+
+Okay, the conversion to LepMap is now nearly complete. The last thing to do is convert from the ACTG format to genotype likelihoods.
+
+To do this, first let's import the bim file, which contains info on which nucleotides are in each marker and which one represent the major and minor alleles.
+
+```{r}
+my.bim <- read_delim("barra52KCRCP.bim", delim = "\t",
+                     col_names = c("col1","markerID","col3","col4","minor","major")) %>%
+  select(markerID,minor,major)
+```
+
+Check the resulting file
+
+```{r}
+head(my.bim)
+```
+
+Let's extract genotype rows from our dataframes
+
+```{r}
+my.genos <- lapply(my.list, function(x){
+  y <- x[7:nrow(x),] %>% rename(markerID = nms)
+  
+  return(y)
+})
+```
+
+```{r}
+head(my.genos$TwoFams)
+```
+
+Now let's join the bim file with the genotype file
+
+```{r}
+my.genos <- lapply(my.genos, function(x){
+  y <- left_join(my.bim, x %>% select(-V1), by="markerID")
+  
+  return(y)
+})
+```
+
+Now let's mutate based on minor and major alleles.
+
+```{r}
+my.genos <- lapply(my.genos, function(x){
+  y <- x %>% mutate(across(starts_with("V"), ~ case_when(
+    . == paste0(major,major) ~ "1 0 0 0 0 0 0 0 0 0",
+    . == paste0(major,minor) ~ "0 1 0 0 0 0 0 0 0 0",
+    . == paste0(minor,major) ~ "0 1 0 0 0 0 0 0 0 0",
+    . == paste0(minor,minor) ~ "0 0 0 0 1 0 0 0 0 0",
+    . == "00" ~ "0 0 0 0 0 0 0 0 0 0")))
+  
+  return(y)
+})
+```
+
+Remove major and minor columns, re-add V1 column with "POS" placeholder
+
+```{r}
+my.genos <- lapply(my.genos, function(x){
+  y <- x %>%
+    select(-minor) %>% select(-major) %>%
+    add_column(V1 = "POS", .before = "V2") %>%
+    rename(nms = markerID)
+  
+  return(y)
+})
+```
+
+Now re-join first 6 rows and genotype rows
+
+```{r}
+my.list.2 <- mapply(function(x,y){
+  z <- rbind(x[1:6,],y)
+  
+  return(z)
+}, my.list, my.genos)
+```
+
+Check final file
+
+```{r}
+my.list.2$TwoFams[1:10,1:10]
+```
+
+
+We have now produced the LEPMAP input files. Let's save them as a text files.
+
+```{r}
+write_delim(my.list.2$TwoFams, file = "LepMap_2families.txt",
+            delim = "\t", col_names = FALSE)
+
+write_delim(my.list.2$fam1, file = "LepMap_family1.txt",
+            delim = "\t", col_names = FALSE)
+
+write_delim(my.list.2$fam2, file = "LepMap_family2.txt",
+            delim = "\t", col_names = FALSE)
+```
+
