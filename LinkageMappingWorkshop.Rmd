@@ -1,0 +1,1040 @@
+---
+title: "Linkage mapping workshop"
+author: "Lorenzo Bertola"
+date: "Document last run on `r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  html_document:
+    theme: sandstone
+    toc: TRUE
+    highlight: pygments
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Setup
+
+Load some useful packages. At the start I mostly use these to provide prettier explanations (e.g., a table of genotype proportions), but later on we will use them to investigate our results.
+
+```{r load.packages}
+library(tidyverse)
+library(knitr)
+library(ggpubr)
+```
+
+We will be running this workshop from an IDE, to directly access the HPC (for JCU students) or the research computing facility of your institution. For this I follow the blog post by Wytamma Wirth, found [here](https://blog.wytamma.com/blog/hcp-vscode/). For more infor check Wytamma's post.
+
+### 1.1. Install Visual Studio Code (VSC)
+
+First thing will be to download Visual Studio Code. To dowload and install, select download at this [link](https://code.visualstudio.com/) and then follow the instructions for installing.
+
+Once installed, select the *Extensions* tab on the left, and search for the *Remote - SSH* extension by Microsoft, which will allow us to connect to the HPC from VSC. Once you found the extension, press 'install'.
+
+If installed correctly, a new option will appear on the left called *Remote explorer*. 
+
+From remote explorer, you will need to select the *+* sign next to SSH, and follow the prompts to connect to your university's HPC. This can vary a lot based on your university's server so we will do that in person for troubleshooting. Crucially, you will first have to connect to the HPC. At this stage you will only connect to your home folder. Then, once logged in, make a directory for this workshop (I called mine *LinkageMapWorkshop*), then select *Open folder* and select the workshop folder. You will be prompted to enter your password again. From now on, if it worked, you should be able to connect directly to the project folder.
+
+Now that we started a new session in the project folder, we can start setting up our data, software and so on.
+
+***IMPORTANT*** the bash commands you will see here, like the `pwd` command below, should be run from the terminal within Visual Studio Code from the project home directory for them to work. If you are running from a different directory adjust the path accordingly.
+
+First thing, from the Terminal within Visual Studio code, run the `pwd` command and check the output.
+
+```{bash check.directory, eval=FALSE}
+pwd
+```
+
+![](../images/0_pwd.png)
+
+Our working directory is now the project folder, handy!
+
+### 1.1. Download software
+
+Now, let's download lepmap and set it up within our project directory. Lepmap comes as a set of executable files to be run with java, so we can download these and store them in a folder within our project directory.
+
+The LepMap executables can be found at the following [link](https://sourceforge.net/projects/lep-map3/). Once downloaded, we can simply drag into our project directory on visual studio code (note: this is a very small file, for larger files it is better to use FileZilla, scp, etc).
+
+We can then unzip the lepmap binary files and store into a folder called *lepmap*. Assuming we have added the zipped file to the project directory, we can unzip with:
+
+```{bash unzip.lepmap, eval=FALSE}
+unzip binary.zip -d lepmap
+```
+
+The binary lepmap files are contained within the *bin* folder.
+
+### 1.2. Import data
+
+Now, let's make a folder for our raw data.
+
+```{bash mkdir.rawdata, eval=FALSE}
+mkdir -p 1_rawdata
+```
+
+And a folder for any script we will prepare
+
+```{bash mkdir.scripts, eval=FALSE}
+mkdir -p scripts
+```
+
+Now that we have prepared the required directories, we can import our raw data into the *rawdata* folder. Once again, for a single family with ~150 F1 offspring and ~20-30k markers the file will be small enough that we can simply drag it to the rawdata folder in VSC, otherwise use your preferred file transfer protocol (e.g., scp, FileZilla).
+
+The input file should look like the below:
+
+```{bash head.rawdata}
+cat ../1_rawdata/input_fam2.txt | head -n 10 | cut -f-5
+```
+
+The first six rows represt the individuals metadata (with 2 placeholder columns containing CHR and POS). The six rows indicate:
+
+1. The unique family ID, where a family represent a group of offspring and their 2 shared parents.
+2. The unique sample/individual ID
+3. The ID of the father (0 if unknown)
+4. The ID of the mother (0 if unknown)
+5. The sex of the individual (2 female, 1 male, 0 unknown)
+6. The phenotype (999 is unknown)
+
+After that, for unmapped data, each row contains the marker ID, followed by a POS placeholder, and the genotype data. If you have mapped data, the first two columns will be the scaffold/chromosome ID, followed by the position in base pairs.
+
+Genotype data is reported as a likelihood, with 10 possible values per individual representing the likelihood of each of the 10 possible genotypes (AA, AT, AG, AC, TT, TG, TC, GG, GC, CC). To denote missing data just leave all 10 as zero.
+
+## 2. Filter data by segregation distortion
+
+Now, look at the first marker (1_67) of the example data provided (see above). Both parents have a value of 1.0 for the second genotype (AT), and the offspring has a value of 1.0 for the 5th genotype (TT). Based on these first 3 individuals, this marker is thus correct given that the offspring has a genotype that is biologically possible given the parent's genotypes.
+
+Let's expand this to a whole family cross. Let's assume that the parents once again both have AT genotypes (i.e., they are both heterozygous). We can then call this marker a *double heterozygote* marker. Then, in the offspring, we will expect a certain proportion of genotypes following mendelian inheritance.
+
+```{r create.tibble, include=FALSE}
+my.cross <- tibble(parent.genotypes = c("A", "T"),
+                   A = c("AA", "AT"),
+                   T = c("AT", "TT"))
+```
+
+```{r table.cross, echo=FALSE}
+knitr::kable(my.cross, "pipe")
+```
+
+Looking at this table, we can see that if the two alleles from each parent are matched at random, we should expect 1/4 of offspring to have a AA genotype (homozygous reference), 1/4 to have a TT genotype (homozygous snp), and 1/4*2 to have AT genotype (heterozygous).
+
+Based on this expectation, we can then discard markers where the offspring genotype proportions are too different from our expectation (i.e., have high segregation distortion).
+
+Additionally, we can call the parent genotypes. Imagine for instance the case where we have one parent with an AT genotype and one parent with no genotype (i.e., missing data),  with 25% of offspring with AA, 25% with TT and 50% with AT. Then we can be confident that the missing parent also has an AT genotype and we can thus impute it. Note that in this case, the more offspring you have the more accurate these two steps (assessing segregation distortion and imputing parent genotypes) are going to be. 
+
+LepMap comes with its own functions to both call the parent genotypes as well as filter based off segregation distortion, called *ParentCall2* and *Filtering2* respectively.
+
+### 2.1. Correct and/or impute parent genotypes
+
+First, let's make a folder where to store the filtered data
+
+```{bash make.output.dir}
+mkdir -p 2_filtered
+```
+
+Then we can run the ParentCall2 and Filtering2 modules of lepmap. Depending on the size of your data, these should not take too long, but for good etiquette given we are using the HPC we will submit them as PBS scripts nonetheless. 
+
+***IMPORTANT***: Note that for this workshop I assume that your data has already gone through some level of filtering to retain only high-quality markers. The exact filtering will depend on your sequencing platform and data type, thus I do not discuss this here.
+
+Let's prepare a script to run the lepmap filtering modules.
+
+```{bash ParentCall.script, eval=FALSE}
+#!/bin/bash
+
+#PBS -j oe
+#PBS -N lepmap.parentcall
+#PBS -l nodes=1:ppn=1
+#PBS -l mem=5gb
+#PBS -l walltime=05:00:00
+
+# Set directory to your project folder
+# you will need to change this to match
+# your folder name and path
+cd ~/LinkageMapWorkshop
+
+# Run the Parent call module
+java -cp lepmap/bin/ ParentCall2 \
+  data=1_rawdata/input_fam1.txt \
+  removeNonInformative=1 > 2_filtered/2_1_filtered_fam1
+  
+# Run the filtering module
+# We will run a few different parameter sets to
+# assess their influence on the output
+
+# DEFAULT parameters
+java -cp lepmap/bin/ Filtering2 \
+  data=2_filtered/2_1_filtered_fam1 \
+  dataTolerance=0.001 > 2_filtered/2_2_filtered_fam1_default
+
+# CONSERVATIVE segregation distortion
+java -cp lepmap/bin/ Filtering2 \
+  data=2_filtered/2_1_filtered_fam1 \
+  dataTolerance=0.00001 > 2_filtered/2_2_filtered_fam1_conservative
+  
+# MAF (Minor Allele Frequency)
+java -cp lepmap/bin/ Filtering2 \
+  data=2_filtered/2_1_filtered_fam1 \
+  dataTolerance=0.001 \
+  MAFLimit=0.01 > 2_filtered/2_2_filtered_fam1_maf
+  
+# Missing data
+java -cp lepmap/bin/ Filtering2 \
+  data=2_filtered/2_1_filtered_fam1 \
+  dataTolerance=0.001 \
+  missingLimit=0.2 > 2_filtered/2_2_filtered_fam1_missing
+```
+
+To run this, copy the script above, from the `#!/bin/bash` line to the `missingLimit=0.2 > filtered_2_fam1_missing` line. Then, in Visual Studio Code, select the scripts folder, and add a text file called `2_filtering.sh`. Paste the text you just copied within the file and save it.
+
+Then, from the terminal window, submit it with:
+
+```{bash submit.filtering, eval=FALSE}
+qsub scripts/2_filtering.sh
+```
+
+Note how we are running Filtering2 with a few different parameters, to better understand their effect on the resulting data. 
+
+#### 2.1.1. Segregation distortion
+
+The segregation distortion parameter represents the p-value limit at which a marker is considered to be deviating from the expected genotype proportions. This parameter is very susceptible to the per-family sample size, the error rate and coverage in the data.
+
+Very *large families* (i.e., >100-300 offspring) with *high coverage* and *low error rate* can use lower values for this parameter, as observed genotype proportions will match the expected proportions really well, and only a handful of individuals (~ < 1% of offspring per family) will contain erroneous genotypes skewing the observed proportions.
+
+On the other hand, for *smaller families* with *medium-low coverage* and *high error rates*, this parameter will need to be kept at the default of 0.001 or increased.
+
+#### 2.1.2. Minor allele frequency
+
+The minor allele frequency parameter works as usual in population genetics: markers with very few copies of the less frequent allele are removed as they are likely to result from sequencing and/or genotyping errors.
+
+I personally do not use this very often in linkage mapping as filtering by segregation distortion will address this pretty well, and in larger families (~ > 50 offspring) the minor allele frequency will usually be minimum of 25% for correctly sequenced and genotyped markers, and those with a MAF < 10-15% will be removed by the segregation distortion filter already.
+
+Nevertheless, we will include it to see how it affects our data.
+
+#### 2.1.3. Missing data
+
+Finally, let's filter based on missing data. This will be particularly useful in this case to remove mis-genotyped markers. For instance if using stacks with the denovo approach some of your alleles from the same marker might be built as 2 different loci, thus resulting in a high level of missing data.
+
+### 2.2. Assess impact of filtering
+
+Let's assess how the different filtering steps changed the number of retained markers.
+
+```{bash assess.filters}
+echo "default ="`cat ../2_filtered/2_2_filtered_fam1_default | wc -l`" markers"
+echo "conservative ="`cat ../2_filtered/2_2_filtered_fam1_conservative | wc -l`" markers"
+echo "maf ="`cat ../2_filtered/2_2_filtered_fam1_maf | wc -l`" markers"
+echo "missing ="`cat ../2_filtered/2_2_filtered_fam1_missing | wc -l`" markers"
+```
+
+***NOTE*** The example data being used was filtered manually in R with custom R scripts. It was filtered very conservatively already so the different filters do not change the resulting number of markers. I have left that code there for you to see and use with your data. If you are interested in the custom R filteiring pipeline, check the [paper](https://www.nature.com/articles/s41437-023-00642-5) and the [code](https://mboitui.github.io/HighDensityLinkageMap/) used.
+
+## 3. Assign markers to linkage groups
+
+The next step once we have nice clean data is to assign the markers to putative chromosomes, known within linkage mapping as ***linkage groups***.
+
+This step is done with the `SeparateChromosomes2` module of lepmap. The format for this module is like the below:
+
+`SeparateChromosomes2 data=input.file lodLimit=NUM sizeLimit=NUM numThreads=NUM > output.file.txt`
+
+These main parameters represent:
+
+- data: the input file output by Filtering2 and/or ParentCall2
+- lodLimit: the minimum LOD score for a marker to be assigned to a linkage group
+- sizeLimit: the minimum numbers of markers in a linkage group for that linkage group to be retained
+- numThreads: number of threads. . . .
+
+Let's run it once with the default lodLimit value and without a sizeLimit option. If you have less than ~150 offspring and less than ~20k markers you can probably run from a login node. To achieve this i submit the following on the terminal within Visual Studio Code.
+
+```{bash Separate.chrom.test, eval=FALSE}
+java -cp lepmap/bin/ SeparateChromosomes2 \
+  data=2_filtered/2_2_filtered_fam1_default \
+  lodLimit=10 > temp/tempfile1.txt
+```
+
+The output file, `tempfile1.txt`, contains a single column where the number indicates the linkage group a marker was assigned to. While there is no markerID, the rows are in the same order as the markers in the input file.
+
+```{bash show.sepchrom.output}
+cat ../temp/tempfile1.txt | head
+```
+
+In this file for instance the first marker is assigned to linkage group 6, the second to linkage group 3, etc.
+
+![](../images/3_SepChrom_1.png)
+
+Looking at the log, using the example data provided, from a cross of Kuranda Treefrogs with 133 offspring and 2 parents, and 8527 SNPs, all but 45 markers were assigned to a linkage group, and a total of 27 linkage groups (LGs) were retained. The species has 13 chromosomes, so at this stage we recovered more linkage groups than there are chromosomes. Let's see how many markers are present in linkage group to start understanding this pattern.
+
+```{bash summarise.sepchrom.output}
+cut -f 1 ../temp/tempfile1.txt | sort | uniq -c | sort -k2 -n | tail -n +2 
+```
+
+This file shows us on the left the number of markers assigned to a linkage group, and on the right the id of the linkage group. Lepmap names linkage group sequentially based on how many markers they contain.
+
+From this we can see that we have 45 markers assigned to no linkage group (first row). Then, we have 12 linkage groups with more than 250 markers each, while the remaining linkage groups have less than 10 markers. To address this, we can use the `sizeLimit` parameter to exclude linkage groups with too few markers to be biologically sensible.
+
+```{bash Separate.chrom.sLimit, eval=FALSE}
+java -cp lepmap/bin/ SeparateChromosomes2 \
+  data=2_filtered/2_2_filtered_fam1_default \
+  lodLimit=10 sizeLimit=50 > temp/tempfile2.txt
+```
+
+![](../images/3_SepChrom_2.png)
+
+We can see now that all the small linkage groups were removed (i.e., the markers were assigned to linkage group 0), and we have identified a total of 12 LGs. This is a lot closer to the expected 13 linkage groups based on our knowledge for the species. Let's assess the number of markers per linkage group to see where this might be coming from.
+
+```{bash summarise.sepchrom.output.2}
+cut -f 1 ../temp/tempfile2.txt | sort | uniq -c | sort -k2 -n | tail -n +2 
+```
+
+We can see that we have 93 marker not assigned to any linkage group, and that the number of markers then decreases somewhat linearly, except between the 1st and 2nd linkage group. Let's plot this to have a better understanding of this.
+
+```{bash save.sepchrom.output}
+cut -f 1 ../temp/tempfile2.txt | sort | uniq -c | sort -k2 -n | tail -n +2 > ../temp/tempfile2.tsv
+```
+
+```{r import.df.sepchrom, message=FALSE}
+tempdf <- read_delim("../temp/tempfile2.tsv", delim = " ",
+                     col_names = c("Markers","LG"))
+
+# Adjust data type
+tempdf <- tempdf %>%
+  mutate(Markers = as.integer(Markers))
+```
+
+```{r plot.nSNP.vs.LG}
+ggplot(tempdf) +
+  geom_point(aes(x=LG, y=Markers)) +
+  scale_x_continuous(limits = c(0,13), breaks = seq(1,13,1)) +
+  scale_y_continuous() +
+  theme_bw()
+```
+
+Here we can clearly see that linkage group 1 has a lot more markers than the rest of the linkage groups. Now this is where linkage mapping becomes tricky, and a good knowledge of the species karyotype can help. For instance, if we knew that one chromosome was ~double the size of all others, we might take this result as a biologically true results. While if we knew that chromosomes were of similar size, we might take this as an issue with our pipeline so far.
+
+One thing to remember although is that larger linkage groups do tend to attract loose markers and sometimes entire linkage groups. 
+
+In light of my knowledge of the species karyotype (13 chromosomes of similar size), i believe that this is the result of using a ***too low lod limit***.
+
+### 3.1. Assess multiple LOD limit values
+
+Thus, let's see what happens when we increase the `lodLimit` parameter. We will do so for a range of values, from 11 to 20. Given that this is now a considerable number of jobs, we will submit them with a PBS script. More specifically, we will use an array job.
+
+```{bash SepChrom.array, eval=FALSE}
+#!/bin/bash
+
+#PBS -j oe
+#PBS -N lepmap.sepchrom
+#PBS -l nodes=1:ppn=2
+#PBS -l mem=1gb
+#PBS -l walltime=05:00:00
+#PBS -J 11-20
+
+# Set directory to your project folder
+# you will need to change this to match
+# your folder name and path
+cd ~/LinkageMapWorkshop
+
+# Assign array index to variable
+LOD=${PBS_ARRAY_INDEX}
+
+# Run Separate chromosomes
+java -cp lepmap/bin/ SeparateChromosomes2 \
+  data=2_filtered/2_2_filtered_fam1_default \
+  lodLimit=${LOD} sizeLimit=50 numThreads=2 > temp/tempfile3_LOD${LOD}.txt
+```
+
+Once again, copy this script, and paste into a new file called `3_sepchrom_test.sh`. Submit with `qsub`
+
+```{bash submit.sepchrom.test, eval=FALSE}
+qsub scripts/3_sepchrom_test.sh
+```
+
+Once all jobs are run, we can check their logfiles (note I have moved all logfiles into a `logfiles` folder).
+
+```{bash check.LOD.logs}
+for i in {11..20}
+do
+echo "LOD = "${i}" "`cat ../logfiles/lepmap.sepchrom.o2475361.${i} | tail -n 1`
+done
+```
+
+So, it looks like simply increasing the LOD value to 11 returns 13 linkage groups, with 102 markers not assigned to any LG. Up to a LOD of 19 we retain 13 linkage groups, but the number of non-assigned markers increases to 525, or `8527/525`%. Then, with a LOD value of 20 the linkage groups are further split and we get 18 LGs. 
+
+Before deciding on a LOD value limit, let's see the number of markers per LG with a LOD value of 20.
+
+```{bash check.high.LOD}
+cut -f 1 ../temp/tempfile3_LOD20.txt | sort | uniq -c | sort -k2 -n | tail -n +2 
+```
+
+It is a pretty linear decrease, with no clear boundary between the 13th LG and the rest in terms of number of markers.
+
+At this stage the decision of what LOD value to use is very delicate, as there is no clear *right* value to use. A lower LOD value (e.g., 11) will include more markers, which is good if your aim is to have a very dense map, but it might add erroneous markers to linkage groups (especially the larger ones). If your aim is to have a very accurate first map on the other hand, use the highest LOD score that retains the biologically correct nunmber of LG. This will give the most accurate map, but also the lower marker density.
+
+For this workshop I will retain both the map with the lowest LOD (11) and the highest LOD (19), so we can compare the results later on. Thus, to move forward, I will create a directory to retain the map files I want to keep and copy the desired map files into that directory.
+
+```{bash make.map.dir.hidden, include=FALSE}
+mkdir -p ../3_mapfiles
+```
+
+```{bash make.map.dir, eval=FALSE}
+mkdir -p 3_mapfiles
+```
+
+Then copy the desired map files
+
+```{bash copy.hidden, include=FALSE}
+for i in 11 19
+do
+cp ../temp/tempfile3_LOD${i}.txt \
+  ../3_mapfiles/3_1_fam1_map_LOD${i}.txt
+done
+```
+
+```{bash copy.mapfiles, eval=FALSE}
+for i in 11 19
+do
+cp temp/tempfile3_LOD${i}.txt \
+  3_mapfiles/3_1_fam1_map_LOD${i}.txt
+done
+```
+
+***NOTE***: In this workshop we are assuming that you know the karyotype of your species (i.e., how many chromosomes). If you do not know, you can still get a pretty confident estimate from your data given that it has low error rate and enough offspring per family. In brief, to do so, I usually run `SeparateChromosomes2` for a range of LOD values, in combination with the `sizeLimit` parameters, to assess whether there is a certain number of linkage groups that comes up consistently across many LOD value. If you are unsure of how to do this yourself, please do not hesitate to contact me on twitter (@Itsfrogday). 
+
+### 3.2. Join singles to existing linkage groups
+
+An additional step at this stage is to add markers not assigned to any linkage group to existing linkage groups. This is a way to increase marker density (by decreasing LOD limit for a marker to be added with `JoinSingles2All`) while ensuring that the biologically correct number of linkage group is used (by having a high LOD value for `SeparateChromosomes2`).
+
+For this example data we won't be doing this, as the number of not-assigned markers is pretty low. But, if you want to do it for your data, you should use the following code:
+
+```{bash join.singles.example, eval=FALSE}
+java -cp lepmap/bin/ JoinSingles2All \
+# Use same data as that used for SeparateChromosomes
+  data=2_filtered/2_2_filtered_fam1_default \
+# Define the map file produced by SeparateChromosomes
+  map=3_mapfiles/3_1_fam1_map_LOD11.txt \
+# Define LOD limit for a marker to be added
+# This should be lower than what you used to identify LGs
+  lodLimit=10 \
+# Define the difference in LOD value for marker matching two LGs
+# below which the marker is not added
+  lodDifference=2 > 3_mapfiles/3_2_fam1_map_LOD11_joinsingles.txt
+```
+
+Note, these are only some of the parameters that can be used. Call the `JoinSingles2All` module without any input to see the other parameters.
+
+## 4. Order markers
+
+Now that we have assigned markers to linkage groups, it is time to order the markers along the linkage groups using the `OrderMarkers2` module from LepMap.
+
+This module has a lot of parameters and options. For today we will mostly focus on a few key ones, as per the below script (note: do not run).
+
+```{bash example.orderMarkers, eval=FALSE}
+java -cp lepmap/bin OrderMarkers2 data=filteredData map=map.txt \
+  # Select whether to include markers with informative father (1), mother (2) or both parents (3).
+  informativeMask=NUM \
+  # Select linkage group to analyse
+  chromosome=NUM \
+  # Select number of threads
+  numThreads=NUM \
+  # Calculate sex-averaged map distances
+  sexAveraged=1 \
+  # Compute and output pair wise LOD scores
+  computeLODscores=file
+  # Calculate distance between markers in cM
+  calculateIntervals=file
+```
+
+These main parameter include the input data file we previously filtered with the `Filtering2` module (e.g., *2_2_filtered_fam1_default*); the map file produced by `SeparateChromosomes2`, which contains the linkage group to which each marker was assigned (e.g. *3_1_fam1_map_LOD11.txt*), and then a set of parameters.
+
+The `informativeMask` can be used to produce the father and mother specific linkage maps (i.e., using only markers that contain information about recombination event for that parent). This can be useful to assess differential recombination between the sexes, and for troubleshooting. I usually always produce male and female specific linkage maps.
+
+LepMap also offers the option to output the sexaveraged linkage map (i.e., the average position in centimorgans between the two sex-specific maps). We will skip this as we can easily calculate it later ourselves.
+
+The computeLODscores and calculateIntervals files can be useful for troubleshooting (i.e., identifying markers that might have been misplaced) and for producing summary statistics (e.g., the average intermarker distance). We most likely will not use these two during the workshop, but I thought it was important to point them out.
+
+Now that we now what is required, we can start preparing some linkage maps. As recommended by the authors of LepMap, the `OrderMarkers2` module should be run multiple times for each linkage group, then selecting the order with the highest likelihood.
+
+### 4.1. Order Markers first run
+
+Let's thus make a script that will run the module separately for each linkage group with five replicates for each linkage group.
+
+First we will need a file with all the set of parameters we want to run (i.e., 13 linkage groups, 5 replicates -> 65 different parameters sets). This will make our life easier when submitting the job as an array.
+
+```{bash create.par.file, eval=FALSE}
+if [ ! -f par.file ]
+then
+    for LG in {1..13}
+    do
+      for REP in a b c d e
+      do
+      newline=${LG}"\t"${REP}
+      echo -e $newline >> par.file
+      done
+    done
+else
+    echo "File already exists"
+fi
+```
+
+```{bash create.par.file.hidden, include=FALSE}
+if [ ! -f ../par.file ]
+then
+    for LG in {1..13}
+    do
+      for REP in a b c d e
+      do
+      newline=${LG}"\t"${REP}
+      echo -e $newline >> ../par.file
+      done
+    done
+else
+    echo "File already exists"
+fi
+```
+
+The resulting parameter file looks like this:
+
+```{bash check.par.file}
+cat ../par.file | head
+```
+
+Now we can build our script:
+
+```{bash run.OrderMarkers, eval=FALSE}
+#!/bin/bash
+
+#PBS -j oe
+#PBS -N lepmap.order
+#PBS -l nodes=1:ppn=2
+#PBS -l mem=1gb
+#PBS -l walltime=50:00:00
+#PBS -J 1-65
+
+# Set directory to your project folder
+# you will need to change this to match
+# your folder name and path
+cd ~/LinkageMapWorkshop
+
+##### Obtain parameters from par file #####
+parameters=`sed -n "${PBS_ARRAY_INDEX} p" par.file`
+# turn parameters into array
+parameterArray=($parameters)
+# assign elements of array to two variables, Linkage Group and REPlicate
+LG=${parameterArray[0]}
+REP=${parameterArray[1]}
+
+# Run Order chromosomes for female map
+java -cp lepmap/bin/ OrderMarkers2 \
+  data=2_filtered/2_2_filtered_fam1_default \
+  map=3_mapfiles/3_1_fam1_map_LOD11.txt \
+  numThreads=2 \
+  chromosome=${LG} informativeMask=23 > 4_orderedMarkers/4_1_fam1_Female_LG${LG}_REP${REP}
+  
+# Run Order chromosomes for male map
+java -cp lepmap/bin/ OrderMarkers2 \
+  data=2_filtered/2_2_filtered_fam1_default \
+  map=3_mapfiles/3_1_fam1_map_LOD11.txt \
+  numThreads=2 \
+  chromosome=${LG} informativeMask=13 > 4_orderedMarkers/4_1_fam1_Male_LG${LG}_REP${REP}
+```
+
+Note that we are saving the results in a folder called `4_orderedMarkers`. Make sure to create the folder first.
+
+```{bash mkdir.ordered.hidden, include=FALSE}
+mkdir -p ../4_orderedMarkers
+```
+
+```{bash mkdir.ordered, eval=FALSE}
+mkdir -p 4_orderedMarkers
+```
+
+Then, like we did before, copy the script in the code chunk above, and past it into a new text file called `4_orderMarkers_1.sh` within Visual Studio Code, in the `scripts` directory.
+
+And finally submit it. Especially for larger families (and especially in the HPC with all these people using it), this step will take a while.
+
+```{bash submit.ordered.1, eval=FALSE}
+qsub scripts/4_orderMarkers_1.sh
+```
+
+***NOTE***: Depending on the number of individuals and markers, you might need to request more resources. For instance, I initially submitted this job with 5 Gb per element of the array and it wasn't enough. Then I submitted with 10 Gb and it was enough for all but the first linkage group. Then I settled on 15Gb per array job. Note I am using ~8500 markers and ~140 individuals. If using a remote server, I recommend trying to submit a single job for the largest linkage group, and once you have found the amount of resources required you can submit the array for all linkage groups.
+
+Once all the jobs have run, we can check the logfiles for errors.
+
+
+```{bash check.order, eval=FALSE}
+grep -E "e:|error|killed" logfiles/lepmap.order.*
+```
+
+```{bash check.order.hidden, echo=FALSE}
+grep -E "e:|error|killed" ../logfiles/lepmap.order.*
+```
+
+Here for instance we can see that one job from the array got killed because it was using too much memory. We can check which one it was.
+
+```{bash check.error.filename, eval=FALSE}
+grep -lE "e:|error|killed" logfiles/lepmap.order.*
+```
+
+```{bash check.error.filename.hidden, echo=FALSE}
+grep -lE "e:|error|killed" ../logfiles/lepmap.order.*
+```
+
+It was from the above file. It is a logfile from one of the previous runs with less memory I saved to show what the output would look like. None of the other logfiles from the actual run have any error, so we can proceed.
+
+### 4.2. Select highest likelihood run
+
+To select the highest likelihood run, I use the below script. It has two loops, one per sex.
+
+```{bash extract.likelihood,eval=FALSE}
+#!/bin/bash
+for LG in {1..13} ; do
+  for REP in {a..e} ; do
+    echo -n "$LG ${REP} " >> "4_2_fam1_Female_LIK.txt"
+    echo | sed '2q;d' "4_1_fam1_Female_LG${LG}_REP${REP}" | awk '{print $7}' >> "4_2_fam1_Female_LIK.txt"
+  done
+done
+
+for LG in {1..13} ; do
+  for REP in {a..e} ; do
+    echo -n "$LG ${REP} " >> "4_2_fam1_Male_LIK.txt"
+    echo | sed '2q;d' "4_1_fam1_Male_LG${LG}_REP${REP}" | awk '{print $7}' >> "4_2_fam1_Male_LIK.txt"
+  done
+done
+```
+
+Copy the above script and paste into a file in the `4_orderedMarkers` folder called `4_2_extractLikelihood.sh`.
+
+From that folder, make the script executable with:
+
+```{bash make.executable, eval=FALSE}
+chmod +x 4_2_extractLikelihood.sh
+```
+
+And then run it
+
+```{bash run.extract.Lik, eval=FALSE}
+./4_2_extractLikelihood.sh
+```
+
+The resulting files for each sex will look like this:
+
+```{bash cat.lik.files, eval=FALSE}
+cat 4_orderedMarkers/4_2_fam1_Female_LIK.txt | head
+```
+
+```{bash cat.lik.files.hidden, echo=FALSE}
+cat ../4_orderedMarkers/4_2_fam1_Female_LIK.txt | head
+```
+
+Let's import it as a dataframe so we can plot likelihoods and select best run for each linkage group.
+
+```{r read.lik.files, message=FALSE}
+fam1_LIK_fem <- read_delim("../4_orderedMarkers/4_2_fam1_Female_LIK.txt",
+                      delim = " ",
+                      col_names = c("LG","ITE","LIK"))
+
+fam1_LIK_male <- read_delim("../4_orderedMarkers/4_2_fam1_Male_LIK.txt",
+                      delim = " ",
+                      col_names = c("LG","ITE","LIK"))
+```
+
+Plot the likelihoods
+
+```{r}
+p1 <- ggplot(fam1_LIK_fem, aes(x = LG, y = LIK, group = LG)) +
+  geom_boxplot() +
+  #adjust based on your number of linkage groups
+  scale_x_continuous(breaks = seq(1,13,1)) +
+  ylab("Likelihood") + xlab("Linkage group") +
+  theme(axis.text.x = element_text(size=6))
+
+
+p2 <- ggplot(fam1_LIK_male, aes(x = LG, y = LIK, group = LG)) +
+  geom_boxplot() +
+  #adjust based on your number of linkage groups
+  scale_x_continuous(breaks = seq(1,13,1)) +
+  ylab("Likelihood") + xlab("Linkage group") +
+  theme(axis.text.x = element_text(size=6))
+
+ggarrange(p1,p2,
+          ncol = 1, nrow = 2, align = "hv",
+          labels = c("female","male"),
+          font.label = list(size = 8))
+```
+
+In the above plot, we have linkage groups on the x axis, and likelihood on the y axis, with values from the female map on top and the male map on the bottom panel.
+
+We can see some patterns:
+- Smaller linkage groups have higher likelihoods. This is a direct result of them having less markers and is to be expected
+- There is little variation in likelihood within linkage group. This is a rudimental indication of 'convergence' (not a statistician, sorry if i'm butchering/misusing this term). That means that regardless of what path the algorithm follows for ordering the markers, the result is mostly the same.
+
+Nevertheless, let's extract the replicate for each linkage group with the highest likelihood, and save them all for a file, one per sex.
+
+```{r extract.likelihood.2}
+fam1_best_fem <- fam1_LIK_fem %>% group_by(LG) %>%
+  slice_max(n=1, order_by=LIK, with_ties=FALSE) %>%
+  select(LG, ITE) %>% unite("Best", remove = TRUE, sep = "_")
+
+fam1_best_male <- fam1_LIK_male %>% group_by(LG) %>%
+  slice_max(n=1, order_by=LIK, with_ties=FALSE) %>%
+  select(LG, ITE) %>% unite("Best", remove = TRUE, sep = "_")
+
+write_delim(fam1_best_fem,
+            file = "../4_orderedMarkers/4_3_fam1_female_Best.txt",
+            delim = "\t", col_names = FALSE)
+
+write_delim(fam1_best_male,
+            file = "../4_orderedMarkers/4_3_fam1_male_Best.txt",
+            delim = "\t", col_names = FALSE)
+```
+
+Now, to make evaluating, plotting and assessing maps easier we will copy the maps with the best likelihoods and rename them with the below script
+
+```{bash move.best, eval=FALSE}
+#!/bin/bash
+
+#loop through rows of file containing best run info
+while read p; do
+  #select LG from row
+  LG=`awk -F'[_]' '{print $1}' <<< "$p"`
+  #select REP id from row
+  REP=`awk -F'[_]' '{print $2}' <<< "$p"`
+  #copy and rename the files for the best run for each LG
+  cp "4_1_fam1_Female_LG${LG}_REP${REP}" "4_4_fam1_female_LG${LG}"
+done < "4_3_fam1_female_Best.txt"
+
+#loop through rows of file containing best run info
+while read p; do
+  #select LG from row
+  LG=`awk -F'[_]' '{print $1}' <<< "$p"`
+  #select REP id from row
+  REP=`awk -F'[_]' '{print $2}' <<< "$p"`
+  #copy and rename the files for the best run for each LG
+  cp "4_1_fam1_Male_LG${LG}_REP${REP}" "4_4_fam1_male_LG${LG}"
+done < "4_3_fam1_male_Best.txt"
+```
+
+Save this as a script called `4_4_moveBest.sh` into the `4_orderedMarkers` directory.
+
+Now we have the a map file for each of the linkage group, selected based on likelihood.
+
+### 4.3. Import and format maps
+
+Let's look at what one of the files output by `OrderMarkers2`.
+
+```{bash show.map}
+cat ../4_orderedMarkers/4_4_fam1_male_LG13 | head
+```
+
+The first row shows the command invoked to produce the file, the second shows the likelihood for this map for this linkage group and the third contains column names. From here onwards, each row represents one marker, with the columns being, as the names suggest, the marker number, the position in the male map, the poisition in the female map, the parental phase and then the phased data.
+
+The marker number represents the row in which that marker was located in the file produced with the `Filtering2` module.
+
+Let's thus gather all of this data in a single data frame, so that we can start plotting it and assessing our maps.
+
+First for the male maps:
+
+```{r merge.male.maps, warning=FALSE, message=FALSE}
+# make list of file names for files containing map data - e.g., 4_4_fam1_male_LG1
+maps.male <- list.files(path = "../4_orderedMarkers",
+                  pattern = glob2rx(pattern="4_4_fam1_male_LG*"),
+                  full.names = TRUE)
+ 
+# name each file according to the linkage group it belongs to
+names(maps.male) <- c("1","10","11","12","13","2","3",
+                "4","5","6","7","8","9")
+  
+# this lapply loop reads the individual tab-delimited files into a list
+maps.male <- lapply(maps.male, function(m) {
+    read_delim(m, delim = "\t",
+               skip = 4,
+               col_names = c("ID","male","female"))
+})
+  
+# this mapply loops iterates over the list of dataframes from the previous step and their LG numbers
+# it adds a column to each dataframe containing info on the LG number
+maps.male <- mapply(function(z,w) {
+    z %>% mutate("LG" = w)
+}, maps.male, names(maps.male), SIMPLIFY = FALSE)
+  
+# now that each dataframe has data on map position, SNPID and LG, we can bind them all together for each family
+maps.male <- do.call("rbind", maps.male)
+```
+
+Then for the female map
+
+```{r merge.female.maps, warning=FALSE, message=FALSE}
+# make list of file names for files containing map data - e.g., 4_4_fam1_male_LG1
+maps.female <- list.files(path = "../4_orderedMarkers",
+                  pattern = glob2rx(pattern="4_4_fam1_female_LG*"),
+                  full.names = TRUE)
+ 
+# name each file according to the linkage group it belongs to
+names(maps.female) <- c("1","10","11","12","13","2","3",
+                "4","5","6","7","8","9")
+  
+# this lapply loop reads the individual tab-delimited files into a list
+maps.female <- lapply(maps.female, function(m) {
+    read_delim(m, delim = "\t",
+               skip = 4,
+               col_names = c("ID","male","female"))
+})
+  
+# this mapply loops iterates over the list of dataframes from the previous step and their LG numbers
+# it adds a column to each dataframe containing info on the LG number
+maps.female <- mapply(function(z,w) {
+    z %>% mutate("LG" = w)
+}, maps.female, names(maps.female), SIMPLIFY = FALSE)
+  
+# now that each dataframe has data on map position, SNPID and LG, we can bind them all together for each family
+maps.female <- do.call("rbind", maps.female)
+```
+
+This is what the resulting dataframe should look like:
+
+```{r show.df}
+head(maps.male)
+```
+
+Let’s full_join these two, retaining only the sex specific map we requested each time. 
+
+```{r merge.maps}
+X <- maps.female %>% select(ID,LG,female)
+Y <- maps.male %>% select(ID,LG,male)
+  
+maps <- full_join(X, Y, by = c("ID","LG"), 
+                 keep = FALSE)
+
+rm(maps.female, maps.male, X, Y)
+```
+
+Unfortunately (and annoyingly) LepMap converts marker IDs to sequential numbers. Let’s retrieve the original marker IDs from the `Filtering2` output.
+
+```{r retrieve.marker.ids, warning=FALSE, message=FALSE}
+# read Filtering2 output
+snpids <- read_delim("../2_filtered/2_2_filtered_fam1_default",
+                delim = "\t",skip = 7,
+                col_names = "SNPID")
+# add column with sequential ids from 1 to nrow
+snpids <- snpids %>% add_column("ID" = seq(1:nrow(snpids)))
+```
+
+Producing this file:
+
+```{r show.snp.ids}
+head(snpids)
+```
+
+The first column represent the snpids you provided when you started using lepmap, the ID column represent the sequential numerical IDs that lepmap uses instead. Now we can add the original IDs to our maps.
+
+```{r add.ids}
+#join
+maps <- left_join(maps, snpids, by="ID")
+  
+#re-arrange
+maps <- maps %>% select(SNPID, ID, LG, male, female)
+```
+
+Now, because we ran the male and female maps separately they are sometimes inverted. To find out which ones are inverted, let’s find the position of their max value (first or last row). If the max value is in the first positions then we will invert the map.
+
+```{r match.female.and.male}
+#create emtpy tibble
+temp <- tibble(
+  SNPID = character(),
+  ID = double(),
+  LG = factor(),
+  male = double(),
+  female = double()
+  )
+
+#loop through linkage groups
+for (i in 1:13) {
+  #retain one linkage group
+  y <- maps %>% filter(LG == i)
+  #find max value for female linkage map
+  my.max <- max(y$female, na.rm = TRUE)
+    
+  #if covariance is negative (inversely correlated)
+  if (cov(y$male, y$female,
+          use = "pairwise.complete.obs") < 0) {
+    #modify female map to be inverted
+    z <- y %>%
+      mutate(female = case_when(
+        female >= 0 ~ (my.max-female),
+        TRUE ~ female
+        ))
+    #add to dataframe
+    temp <- bind_rows(temp,z)
+    }
+  #if covariance is positive
+  else {
+    #bind orignal non-modified dataframe
+    temp <- bind_rows(temp,y)
+  }
+}
+
+#rename
+old.maps <- maps
+maps <- temp
+
+#remove unnecessary intermediate files
+rm(temp,y,z,i,my.max)
+```
+
+This step was a bit rushed (sorry i'm running out of time preparing this workshop). But don't worry, we get the non-inverted maps, and the reason for this step will become clearer once we plot the maps.
+
+Finally, let’s save these, both as tab-delimited files. We will do so in a new folder called `5_maps`
+
+```{r save.first.map}
+write_delim(maps, file = "../5_maps/5_1_fam1_linkageMap.txt",
+            delim = "\t",col_names = T)
+```
+
+### 4.4. Plot male versus female maps
+
+A very good way to both assess the quality of a map, troubleshoot, and gain the first biological insights for your species is to plot the male and female maps against each other.
+
+First, let's do one final tidy up
+
+```{r relevel.LG}
+old.maps <- old.maps %>% mutate(LG = fct_relevel(LG, "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"))
+
+maps <- maps %>% mutate(LG = fct_relevel(LG, "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"))
+```
+
+And then plot the maps
+
+```{r plot.male.vs.female.1}
+p1 <- ggplot(old.maps,
+             aes(x=female, y=male,
+                 group = LG, colour = LG)) +
+  geom_point(size=0.5) + theme_classic() +
+  scale_y_continuous(limits = c(0, 170),
+                     breaks = seq(0, 150, by = 50)) +
+  scale_x_continuous(limits = c(0,265),
+                     breaks = seq(0, 250, by = 50))
+
+p1
+```
+
+Wow, this looks messy! Lorenzo must have made a mistake somewhere. Can you see what might be going on? This map is the one where we did not match the male and female maps As in, the start for some of the male maps, is the end in the respective female map. So, let's plot the same data adjusted for this issue (we produced this before)
+
+```{r plot.male.vs.female.2}
+p2 <- ggplot(maps,
+             aes(x=female, y=male,
+                 group = LG, colour = LG)) +
+  geom_point(size=0.5) + theme_classic() +
+  scale_y_continuous(limits = c(0, 170),
+                     breaks = seq(0, 150, by = 50)) +
+  scale_x_continuous(limits = c(0,265),
+                     breaks = seq(0, 250, by = 50))
+
+p2
+```
+
+Now this is starting to look a bit more tidy. Let's try and interpret it. On the x-axis we have the position for the marker on the female linkage map. On the y-axis we have instead the position on the male map.
+
+Now, a basic assumption is that markers should mainly have the same order in the genome of the female and male parent, thus we would expect a 1:1 relationship.
+
+But! Here we are not mapping position directly, but position as it can be inferred frmo recombination rates! Importantly, recombination rates differ between sexes, and thus we obtain this S-shaped relationship. Let's look at the map for a single linkage group.
+
+```{r plot.LG2}
+p3 <- ggplot(maps %>% filter(LG==2),
+             aes(x=female, y=male,
+                 group = LG, colour = LG)) +
+  geom_point(size=0.5) + theme_classic() +
+  scale_y_continuous(limits = c(0, 170),
+                     breaks = seq(0, 150, by = 50)) +
+  scale_x_continuous(limits = c(0,265),
+                     breaks = seq(0, 250, by = 50))
+
+p3
+```
+
+Now this relationship is a bit clearer. What can we gather from this plot?
+
+1. The female experiences overall more recombination than the male (in this species). This is highlighted by the longer length for the female map for LG2.
+2. A lot of markers in the male map are placed within the same position (~50-55 cM). This is likely because of a very low recombination rate towards the centre of the chromosome in the male.
+
+In frogs, this difference in recombination is the result of chiasmata forming evenly across the chromosomes in biological females, while in biological males they form mostly around the ends of the chromosomes.
+
+Okay, now that we are starting to understand this better, let's plot all linkage groups individually and see if we can spot anything else.
+
+```{r}
+# Remove any row with NAs
+# these are the rows that include markers mapped only in the male or female map
+# Thus, we will only be mapping markers heterozygous for both parents
+maps.NA <- maps %>% drop_na()
+
+# Plot the resulting data
+p4 <- ggplot(maps.NA, aes(x=female, y=male,
+                          group = LG, colour = LG)) +
+  #facet by Linkage group
+  geom_point() + facet_wrap(~LG, ncol = 5) +
+  ylab("") + xlab("") +
+  theme(strip.background = element_blank(),
+        strip.text.x = element_blank()) +
+  theme_classic()
+
+p4
+```
+
+Okay, we've produced some beautiful rainbow worms. We know that because of the S-shape of these worms, recombination rate is heterogenous within and across the two sexes. But that's not the only thing. These S-shapes can start to show some things that might have not worked.Can you spot them? 
+
+It's okay if you haven't. Let's try and plot each sex separately, and see whether the issue becomes evident. I am going to be cheating now and select a certain linkage group. Linkage group 4. Have you spotted the issue yet?
+
+Don't worry, soon. First we plot male vs female LG4
+
+```{r plot.LG4}
+p5 <- ggplot(maps %>% filter(LG==4),
+             aes(x=female, y=male,
+                 group = LG, colour = LG)) +
+  geom_point(size=0.5) + theme_classic() +
+  scale_y_continuous(limits = c(0, 170),
+                     breaks = seq(0, 150, by = 50)) +
+  scale_x_continuous(limits = c(0,265),
+                     breaks = seq(0, 250, by = 50))
+
+p5
+```
+
+Mmm, something insteresting here do you agree? The female map seems to start frmo 50 centimorgans. This results in the S shape being shifted a bit to the right. At the moment we are plotting only double heterozygous markers. To find the culprit we will have to plot uni-parental (i.e., heterozygous in one parent only) markers. To achieve this we will do a little trick, of plotting the map position in one sex against sequential integers.
+
+```{r LG4.male.qplot}
+temp <- maps %>% filter(LG == 4) %>% arrange(male)
+
+qplot(seq_along(temp$male), temp$male) +
+  theme_classic()
+```
+
+Here on the x axis we have the actual position, while on the y axis we have the numerical position for each marker (i.e., the marker in position 0 gets a 1, the marker in position 0.3 cM gets a 2, the next marker at 0.41 cM gets a 3, and so on). For the male map, it look's alright. Let's plot the female map now.
+
+```{r LG4.female.qplot}
+temp <- maps %>% filter(LG == 4) %>% arrange(female)
+
+qplot(seq_along(temp$female), temp$female) +
+  theme_classic()
+```
+
+A-ha! once again, a lot to learn from one figure. First of all, the S-shape is absent. That is because recombination in the female is mostly homogeneous (i.e., recombination rate is similar across the cromosome). BUT! if it is so heterogeneous, why then do we have such a big gap between markers at 0 cM and those after ~50cM? Have you guessed it yet? It's an error! Let's try and find the culprits.
+
+```{r investigate.LG4}
+maps %>% filter(LG==4) %>% arrange(female) %>% head(n=20)
+```
+
+Here we have it. We have 8 markers at position 0, and 45 centiMorgans later we have the next marker. But, how can we have so many markers being wrong in the same way? Well, that's because when preparing this data during genotyping two loci merged into 1, specifically into a locus called 209399. Because of this, the locus now looks hyper diverse, and has a total of 8 SNPs, from a mere 69 bp long sequence!! Pretty unlikely from a biologically standpoint. The result is that the increased number of differences (because of genotyping errors) inflated the observed recombination ratio, causing this long gap at the end. Fortunately, a lot of erroneous markers (in otherwise good quality, conservatively filtered data) will behave this way, and gravitate towards the ends of each linkage group.
+
+Thus, one key step when polishing and assessing the quality of your maps should be to investigate each linkage group, looking for any group of ~1-2 loci that cause gaps longer than 10-15 cM at the end of the LG.
+
+What to do next? Well, now that we now what markers are erroneous, we can exclude them from the linkage map and re-run the `OrderMarkers2` module. There are many ways to do this, and I encourage you to find what works best for you. Now I will show you how I have been doing it (fully aware that it is a bit clunky).
+
+***NOTE***: For the sake of the workshop, we will be doing this only for LG4, but for your own maps you should take the time to investigate each linkage group, both by plotting the linkage group as well as inspecting the data for that LG as a table (as we did above).
+
+- remove marker from file
+- re-run OrderMarkers for LG4 (check if there is option to re-run and exclude marker)
+- import new LG4 map
+- replace previous LG4 (filter out LG4 then concatenate new)
+- plot LG4 again to show difference
+- plot with LinkageMapView
+- start github repository
+
+
+
+
+
