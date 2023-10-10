@@ -82,10 +82,10 @@ Now that we have prepared the required directories, we can import our raw data i
 The input file should look like the below:
 
 ```{bash head.rawdata}
-cat ../1_rawdata/input_fam2.txt | head -n 10 | cut -f-5
+cat ../1_rawdata/input_fam1.txt | head -n 10 | cut -f-5
 ```
 
-The first six rows represt the individuals metadata (with 2 placeholder columns containing CHR and POS). The six rows indicate:
+The first six rows represent the individuals metadata (with 2 placeholder columns containing CHR and POS). The six rows indicate:
 
 1. The unique family ID, where a family represent a group of offspring and their 2 shared parents.
 2. The unique sample/individual ID
@@ -750,7 +750,9 @@ maps.male <- lapply(maps.male, function(m) {
 # this mapply loops iterates over the list of dataframes from the previous step and their LG numbers
 # it adds a column to each dataframe containing info on the LG number
 maps.male <- mapply(function(z,w) {
-    z %>% mutate("LG" = w)
+  z <- z %>% select(ID,male,female)
+    
+  z %>% mutate("LG" = w)
 }, maps.male, names(maps.male), SIMPLIFY = FALSE)
   
 # now that each dataframe has data on map position, SNPID and LG, we can bind them all together for each family
@@ -779,7 +781,8 @@ maps.female <- lapply(maps.female, function(m) {
 # this mapply loops iterates over the list of dataframes from the previous step and their LG numbers
 # it adds a column to each dataframe containing info on the LG number
 maps.female <- mapply(function(z,w) {
-    z %>% mutate("LG" = w)
+  z <- z %>% select(ID, male, female)
+  z %>% mutate("LG" = w)
 }, maps.female, names(maps.female), SIMPLIFY = FALSE)
   
 # now that each dataframe has data on map position, SNPID and LG, we can bind them all together for each family
@@ -975,6 +978,8 @@ p4 <- ggplot(maps.NA, aes(x=female, y=male,
 p4
 ```
 
+### 4.5. Identify erroneous markers
+
 Okay, we've produced some beautiful rainbow worms. We know that because of the S-shape of these worms, recombination rate is heterogenous within and across the two sexes. But that's not the only thing. These S-shapes can start to show some things that might have not worked.Can you spot them? 
 
 It's okay if you haven't. Let's try and plot each sex separately, and see whether the issue becomes evident. I am going to be cheating now and select a certain linkage group. Linkage group 4. Have you spotted the issue yet?
@@ -1024,17 +1029,491 @@ Thus, one key step when polishing and assessing the quality of your maps should 
 
 What to do next? Well, now that we now what markers are erroneous, we can exclude them from the linkage map and re-run the `OrderMarkers2` module. There are many ways to do this, and I encourage you to find what works best for you. Now I will show you how I have been doing it (fully aware that it is a bit clunky).
 
-***NOTE***: For the sake of the workshop, we will be doing this only for LG4, but for your own maps you should take the time to investigate each linkage group, both by plotting the linkage group as well as inspecting the data for that LG as a table (as we did above).
+The first step is to produce a new map file where the unwanted markers are assigned to LG 0. So, let's re-read the list of snpids, as well as the map file used for the OrderMarkers2 step (either the output of SeparateChromosomes2 or JoinSingles2All).
 
-- remove marker from file
-- re-run OrderMarkers for LG4 (check if there is option to re-run and exclude marker)
-- import new LG4 map
-- replace previous LG4 (filter out LG4 then concatenate new)
-- plot LG4 again to show difference
-- plot with LinkageMapView
-- start github repository
+Read in map file
 
+```{r read.in.map.file, message=FALSE}
+mapfile <- read_delim("../3_mapfiles/3_1_fam1_map_LOD11.txt", col_names = "LG", skip = 1, delim="\t")
+```
 
+The list of snpids can be obtained from the genotype file used as the `data` input for OrderMarkers2 (i.e., the output of the Filtering2 module).
 
+```{r retrieve.marker.ids.2, warning=FALSE, message=FALSE}
+# read Filtering2 output
+snpids <- read_delim(
+  "../2_filtered/2_2_filtered_fam1_default",
+                delim = "\t",skip = 7,
+                col_names = "SNPID")
+# add column with sequential ids from 1 to nrow
+snpids <- snpids %>% add_column("ID" = seq(1:nrow(snpids)))
+```
 
+Now we can merge the snpids and mapfile dataframes.
+
+```{r produce.map.file}
+mapfile <- tibble("markerID"=snpids$SNPID,
+                  "LG"=mapfile$LG)
+```
+
+To produce the following output:
+
+```{r check.map.file}
+head(mapfile)
+```
+
+Now we want to change the value of LG to 0 for those markers we identified on locus 209399.
+
+```{r remove.err.markers}
+mapfile2 <- mapfile %>%
+  mutate(LG = case_when(
+    markerID == "209399_6" ~ 0,
+    markerID == "209399_12" ~ 0,
+    markerID == "209399_14" ~ 0,
+    markerID == "209399_17" ~ 0,
+    markerID == "209399_39" ~ 0,
+    markerID == "209399_41" ~ 0,
+    markerID == "209399_46" ~ 0,
+    markerID == "209399_53" ~ 0,
+    TRUE ~ LG))
+```
+
+To check it worked we can compare number of markers in LG for the two dataframes.
+
+```{r check.rm.worked}
+table(mapfile$LG)
+```
+
+```{r check.rm.worked.2}
+table(mapfile2$LG)
+```
+
+Good, LG four has 8 less markers assigned. Now let's save the LG column of mapfile2 as a textfile to be used as a mapfile for re-running OrderMarkers2.
+
+```{r save.new.map}
+write_delim(as.data.frame(mapfile2$LG),
+            file = "../6_reorder/6_1_fam1_map_LOD11.txt",
+            delim = "\t",
+            col_names = FALSE)
+```
+
+The resulting file has 1 column, with no header, containing the LG each marker in the input file for OrderMarkers is assigned to.
+
+Now we can re-run the `OrderMarkers2` module with the new map file. Here I do so only for LG4 and with one replicate, to highlight how this work. For your project you should run multiple replicates, and you might have to run multiple LGs as well. If that's the case, simply replicate the array job we used for the first run of OrderMarkers.
+
+```{bash rerun.order.markers, eval=FALSE}
+#!/bin/bash
+
+#PBS -j oe
+#PBS -N lepmap.order
+#PBS -l nodes=1:ppn=2
+#PBS -l mem=15gb
+#PBS -l walltime=10:00:00
+
+# Set directory to your project folder
+# you will need to change this to match
+# your folder name and path
+cd ~/LinkageMapWorkshop
+
+##### Obtain parameters from par file #####
+#parameters=`sed -n "${PBS_ARRAY_INDEX} p" par.file`
+# turn parameters into array
+#parameterArray=($parameters)
+# assign elements of array to two variables, Linkage Group and REPlicate
+#LG=${parameterArray[0]}
+#REP=${parameterArray[1]}
+
+# Run Order chromosomes for female map
+java -cp lepmap/bin/ OrderMarkers2 \
+  data=2_filtered/2_2_filtered_fam1_default \
+  map=6_reorder/6_1_fam1_map_LOD11.txt \
+  numThreads=2 \
+  chromosome=4 informativeMask=23 > 6_reorder/6_1_fam1_Female_LG4_REPa
+  
+# Run Order chromosomes for male map
+java -cp lepmap/bin/ OrderMarkers2 \
+  data=2_filtered/2_2_filtered_fam1_default \
+  map=6_reorder/6_1_fam1_map_LOD11.txt \
+  numThreads=2 \
+  chromosome=4 informativeMask=13 > 6_reorder/6_1_fam1_Male_LG4_REPa
+```
+
+While we wait for this to be done, I just wanted to point out that `OrderMarkers2` now includes an argument to exclude certain markers. For a few markers (e.g., < 5-10), this might be easier than the method I just showed, but if you are removing 10s of markers 'silencing' them from the map file might be easier.
+
+Once the new files finished running, we can import them as we did before.
+
+First for the male maps:
+
+```{r merge.male.maps.2, warning=FALSE, message=FALSE}
+# make list of file names for files containing map data - 
+maps.male <- list.files(path = "../6_reorder",
+                  pattern = glob2rx(pattern="6_1_fam1_Male_LG*"),
+                  full.names = TRUE)
+ 
+# name each file according to the linkage group it belongs to
+names(maps.male) <- c("4")
+  
+# this lapply loop reads the individual tab-delimited files into a list
+maps.male <- lapply(maps.male, function(m) {
+    read_delim(m, delim = "\t",
+               skip = 4,
+               col_names = c("ID","male","female"))
+})
+  
+# this mapply loops iterates over the list of dataframes from the previous step and their LG numbers
+# it adds a column to each dataframe containing info on the LG number
+maps.male <- mapply(function(z,w) {
+  z <- z %>% select(ID,male,female)
+    
+  z %>% mutate("LG" = w)
+}, maps.male, names(maps.male), SIMPLIFY = FALSE)
+  
+# now that each dataframe has data on map position, SNPID and LG, we can bind them all together for each family
+maps.male <- do.call("rbind", maps.male)
+```
+
+Then for the female map
+
+```{r merge.female.maps.2, warning=FALSE, message=FALSE}
+# make list of file names for files containing map data - 
+maps.female <- list.files(path = "../6_reorder",
+                  pattern = glob2rx(pattern="6_1_fam1_Female_LG*"),
+                  full.names = TRUE)
+ 
+# name each file according to the linkage group it belongs to
+names(maps.female) <- c("4")
+  
+# this lapply loop reads the individual tab-delimited files into a list
+maps.female <- lapply(maps.female, function(m) {
+    read_delim(m, delim = "\t",
+               skip = 4,
+               col_names = c("ID","male","female"))
+})
+  
+# this mapply loops iterates over the list of dataframes from the previous step and their LG numbers
+# it adds a column to each dataframe containing info on the LG number
+maps.female <- mapply(function(z,w) {
+  z <- z %>% select(ID, male, female)
+  z %>% mutate("LG" = w)
+}, maps.female, names(maps.female), SIMPLIFY = FALSE)
+  
+# now that each dataframe has data on map position, SNPID and LG, we can bind them all together for each family
+maps.female <- do.call("rbind", maps.female)
+```
+
+Let’s full_join these two, retaining only the sex specific map we requested each time. 
+
+```{r merge.maps.2}
+X <- maps.female %>% select(ID,LG,female)
+Y <- maps.male %>% select(ID,LG,male)
+  
+maps.2 <- full_join(X, Y, by = c("ID","LG"), 
+                 keep = FALSE)
+
+rm(maps.female, maps.male, X, Y)
+```
+
+Now we can add the original IDs to our maps.
+
+```{r add.ids.2}
+#join
+maps.2 <- left_join(maps.2, snpids, by="ID")
+  
+#re-arrange
+maps.2 <- maps.2 %>% select(SNPID, ID, LG, male, female)
+```
+
+Now invert LGs if needed like before.
+
+```{r match.female.and.male.2}
+#create emtpy tibble
+temp <- tibble(
+  SNPID = character(),
+  ID = double(),
+  LG = factor(),
+  male = double(),
+  female = double()
+  )
+
+#loop through linkage groups
+for (i in 4) {
+  #retain one linkage group
+  y <- maps.2 %>% filter(LG == i)
+  #find max value for female linkage map
+  my.max <- max(y$female, na.rm = TRUE)
+    
+  #if covariance is negative (inversely correlated)
+  if (cov(y$male, y$female,
+          use = "pairwise.complete.obs") < 0) {
+    #modify female map to be inverted
+    z <- y %>%
+      mutate(female = case_when(
+        female >= 0 ~ (my.max-female),
+        TRUE ~ female
+        ))
+    #add to dataframe
+    temp <- bind_rows(temp,z)
+    }
+  #if covariance is positive
+  else {
+    #bind orignal non-modified dataframe
+    temp <- bind_rows(temp,y)
+  }
+}
+
+#rename
+maps.2 <- temp
+
+#remove unnecessary intermediate files
+rm(temp,y,z,i,my.max)
+```
+
+Now let's plot LG4 to check that we have fixed the issue.
+
+```{r re.plot.LG4}
+i5 <- ggplot(maps.2 %>% filter(LG==4),
+             aes(x=female, y=male,
+                 group = LG, colour = LG)) +
+  geom_point(size=0.5) + theme_classic() +
+  scale_y_continuous(limits = c(0, 170),
+                     breaks = seq(0, 150, by = 50)) +
+  scale_x_continuous(limits = c(0,265),
+                     breaks = seq(0, 250, by = 50))
+
+i5
+```
+
+Now both maps start at 0cM!
+
+```{r LG4.male.qplot.2}
+temp <- maps.2 %>% filter(LG == 4) %>% arrange(male)
+
+qplot(seq_along(temp$male), temp$male) +
+  theme_classic()
+```
+
+```{r LG4.female.qplot.2}
+temp <- maps.2 %>% filter(LG == 4) %>% arrange(female)
+
+qplot(seq_along(temp$female), temp$female) +
+  theme_classic()
+```
+
+And we can see that that long gap in the female map is gone. Thus, let's proceed and replace the old map for LG4 with the new corrected one.
+
+```{r}
+#filter old LG map
+maps <- maps %>% filter(LG != 4)
+
+#concatenate to add new re-ordered maps
+maps <- rbind(maps, maps.2)
+```
+
+Now let's plot all 13 LGs again.
+
+```{r plot.reordered.maps}
+# Remove any row with NAs
+# these are the rows that include markers mapped only in the male or female map
+# Thus, we will only be mapping markers heterozygous for both parents
+maps.NA <- maps %>% drop_na()
+
+# Plot the resulting data
+i4 <- ggplot(maps.NA, aes(x=female, y=male,
+                          group = LG, colour = LG)) +
+  #facet by Linkage group
+  geom_point(size=0.5) + facet_wrap(~LG, ncol = 5) +
+  ylab("") + xlab("") +
+  theme(strip.background = element_blank(),
+        strip.text.x = element_blank()) +
+  theme_classic()
+
+i4
+```
+
+***NOTE***: Within this document, we have only investigated erroneous markers in LG4 to give you an idea of what this would entail. From the above plot we can see that LG5, LG7, and LG10 also have some erroneous markers. For your own project, you should do this for each of your linkage groups.
+
+Finally, before moving on make sure to save the map file.
+
+```{r save.ordered.map, eval=FALSE}
+write_delim(maps,
+            file = "../6_reorder/6_2_fam1_maps.txt",
+            delim = "\t",
+            col_names = TRUE)
+```
+
+## 5. Plot maps with LinkageMapView
+
+Finally, we will make nice plots of our linkage maps using the LinkageMapView package. 
+
+### 5.1. Load LinkageMapView
+
+```{r load.linmapview}
+library(LinkageMapView)
+```
+
+### 5.2. Calculate sex-average map
+
+The sex-average map is usually calculated with (male+female)/2. So let's do this accordingly.
+
+```{r calc.sex.average}
+maps <- maps %>% mutate(
+  sex.averaged = case_when(is.na(male) == TRUE ~ female,
+                           is.na(female) ==  TRUE ~ male,
+                           TRUE ~ (male+female)/2)
+)
+```
+
+### 5.2. Format data for linkage map view
+
+Now we have to convert to the required format (yay, another conversion).
+
+```{r}
+LMV_male <- maps %>%
+  select(LG,male,SNPID) %>%
+  drop_na() %>%
+  rename(group = LG, position = male,
+           locus = SNPID) %>%
+  mutate(across(where(is.factor),
+                  as.character)) %>%
+  mutate(group = paste0(group, "M"))
+
+LMV_female <- maps %>%
+  select(LG,female,SNPID) %>%
+  drop_na() %>%
+  rename(group = LG, position = female,
+           locus = SNPID) %>%
+  mutate(across(where(is.factor),
+                  as.character)) %>%
+  mutate(group = paste0(group, "F"))
+
+LMV_average <- maps %>%
+  select(LG,sex.averaged,SNPID) %>%
+  drop_na() %>%
+  rename(group = LG, position = sex.averaged,
+           locus = SNPID) %>%
+  mutate(across(where(is.factor),
+                  as.character)) %>%
+  mutate(group = paste0(group, "A"))
+
+my.map <- rbind(LMV_male, LMV_female, LMV_average)
+
+levels <- c("1F","1M","1A",
+            "2F","2M","2A",
+            "3F","3M","3A",
+            "4F","4M","4A",
+            "5F","5M","5A",
+            "6F","6M","6A",
+            "7F","7M","7A",
+            "8F","8M","8A",
+            "9F","9M","9A",
+            "10F","10M","10A",
+            "11F","11M","11A",
+            "12F","12M","12A",
+            "13F","13M","13A")
+
+my.map$group <- fct_relevel(my.map$group,
+                        levels = levels)
+```
+
+And order the maps according to the position in cM
+
+```{r order.maps}
+my.map <- my.map[order(my.map$group,my.map$position),]
+```
+
+### 5.3. Plot density maps
+
+```{r density.male, eval=FALSE}
+outfile = file.path("../7_LMVplots/7_1_maleMap_density.pdf")
+
+lmv.linkage.plot(LMV_male,outfile,denmap=TRUE,
+                 pdf.width = 15, pdf.height = 15,
+                 cex.axis = 2,lgw = 0.30,cex.lgtitle = 2,
+                 font.main = 2,cex.main = 3,
+                 main="Male linkage maps")
+```
+
+```{r density.female, eval=FALSE}
+outfile = file.path("../7_LMVplots/7_1_femaleMap_density.pdf")
+
+lmv.linkage.plot(LMV_female,outfile,denmap=TRUE,
+                 pdf.width = 15, pdf.height = 15,
+                 cex.axis = 2,lgw = 0.30,cex.lgtitle = 2,
+                 font.main = 2,cex.main = 3,
+                 main="Male linkage maps")
+```
+
+```{r density.average, eval=FALSE}
+outfile = file.path("../7_LMVplots/7_1_averageMap_density.pdf")
+
+lmv.linkage.plot(LMV_average,outfile,denmap=TRUE,
+                 pdf.width = 15, pdf.height = 15,
+                 cex.axis = 2,lgw = 0.30,cex.lgtitle = 2,
+                 font.main = 2,cex.main = 3,
+                 main="Male linkage maps")
+```
+
+### 5.4. Plot black and white maps
+
+Now let’s plot the male, female and sex-averaged linkage maps showing only the position of markers as black horizontal lines.
+
+```{r male.bw, eval=FALSE}
+outfile = file.path("../7_LMVplots/7_2_maleMap.pdf")
+
+lmv.linkage.plot(LMV_male,outfile,
+                 #need to use showonly to show only one marker, otherwise they get too dense and unreadable
+                 showonly = c("25_8"),
+                 ruler = TRUE,cex.axis = 2,
+                 lgw = 0.30,
+                 lgtitles = c("LG1","LG2","LG3","LG4",
+                              "LG5","LG6","LG7","LG8",
+                              "LG9","LG10","LG11","LG12",
+                              "LG13"),
+                 cex.lgtitle = 2,
+                 pdf.width = 20, pdf.height = 18,
+                 main="Male linkage maps",
+                 font.main = 2,cex.main = 3)
+```
+
+```{r female.bw, eval=FALSE}
+outfile = file.path("../7_LMVplots/7_2_femaleMap.pdf")
+
+lmv.linkage.plot(LMV_female,outfile,
+                 #need to use showonly to show only one marker, otherwise they get too dense and unreadable
+                 showonly = c("27576_47"),
+                 ruler = TRUE,cex.axis = 2,
+                 lgw = 0.30,
+                 lgtitles = c("LG1","LG2","LG3","LG4",
+                              "LG5","LG6","LG7","LG8",
+                              "LG9","LG10","LG11","LG12",
+                              "LG13"),
+                 cex.lgtitle = 2,
+                 pdf.width = 20, pdf.height = 18,
+                 main="Female linkage maps",
+                 font.main = 2,cex.main = 3)
+```
+
+```{r average.bw, eval=FALSE}
+outfile = file.path("../7_LMVplots/7_2_averageMap.pdf")
+
+lmv.linkage.plot(LMV_average,outfile,
+                 #need to use showonly to show only one marker, otherwise they get too dense and unreadable
+                 showonly = c("25_8"),
+                 ruler = TRUE,cex.axis = 2,
+                 lgw = 0.30,
+                 lgtitles = c("LG1","LG2","LG3","LG4",
+                              "LG5","LG6","LG7","LG8",
+                              "LG9","LG10","LG11","LG12",
+                              "LG13"),
+                 cex.lgtitle = 2,
+                 pdf.width = 20, pdf.height = 18,
+                 main="Sex-averaged linkage maps",
+                 font.main = 2,cex.main = 3)
+```
+
+### 5.5. Plot male vs female maps
+
+```{r}
+
+```
 
