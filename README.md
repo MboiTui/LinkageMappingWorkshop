@@ -1,5 +1,5 @@
 # LinkageMappingWorkshop
-In this directory I have scripts and data for the JCU Acquaculture Linkage Mapping workshop help between the 8th and 11th of October, 2023.
+In this directory I have scripts and data for the JCU Acquaculture Linkage Mapping workshop held between the 8th and 11th of October, 2023.
 
 The requirements for this workshop are:
 - R version 4+
